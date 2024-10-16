@@ -9,6 +9,7 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.util.Iterator;
 import java.util.Scanner;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
@@ -19,9 +20,6 @@ import org.json.JSONObject;
 
 public class Main {
 
-    private static final String API_KEY = System.getenv("GOOGLE_SEARCH_API_KEY");
-    private static final String SEARCH_ENGINE_ID = System.getenv("GOOGLE_SEARCH_ENGINE_ID");
-
     public static void main(String[] args) {
         if (args.length != 3) {
             System.out.println("Usage: java GoogleImageSearch <search_query> <output_path> <image_count>");
@@ -31,26 +29,55 @@ public class Main {
         String searchQuery = args[0];
         String outputPath = args[1];
         int imageCount = Integer.parseInt(args[2]);
+        String apiKeysEnv = System.getenv("GOOGLE_SEARCH_API_KEYS"); // format: {"creds":[{"engineId":"", "apiKey":""}, ...]}
 
-        searchAndDownloadImages(searchQuery, outputPath, imageCount);
+        if (apiKeysEnv == null || apiKeysEnv.isEmpty()) {
+            System.err.println("Environment variable GOOGLE_SEARCH_API_KEYS is not set.");
+            return;
+        }
+
+        JSONArray apiCredentials = new JSONObject(apiKeysEnv).getJSONArray("creds");
+        Iterator<Object> credsIterator = apiCredentials.iterator();
+
+        while (credsIterator.hasNext()) {
+            JSONObject cred = (JSONObject) credsIterator.next();
+            String engineId = cred.getString("engineId");
+            String apiKey = cred.getString("apiKey");
+
+            if (searchAndDownloadImages(searchQuery, outputPath, imageCount, engineId, apiKey)) {
+                break; // Exit if the download was successful
+            }
+        }
     }
 
-    public static void searchAndDownloadImages(String query, String outputPath, int numImages) {
+    public static boolean searchAndDownloadImages(String query, String outputPath, int numImages, String engineId, String apiKey) {
         try {
             int downloadedImages = 0;
             int startIndex = 1;
+            int searchLimit = 10;
 
-            ExecutorService executor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors()*2);
+            ExecutorService executor = Executors.newFixedThreadPool(10);
 
             while (downloadedImages < numImages) {
+                if (numImages - downloadedImages < searchLimit) {
+                    searchLimit = numImages - downloadedImages;
+                }
+
                 String encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8.toString());
                 String requestUrl = "https://www.googleapis.com/customsearch/v1?q=" + encodedQuery
-                        + "&cx=" + SEARCH_ENGINE_ID + "&key=" + API_KEY
-                        + "&searchType=image&start=" + startIndex;
+                        + "&cx=" + engineId + "&key=" + apiKey
+                        + "&searchType=image&start=" + startIndex
+                        + "&num=" + searchLimit;
+
                 HttpURLConnection connection = (HttpURLConnection) new URL(requestUrl).openConnection();
                 connection.setRequestMethod("GET");
                 connection.setReadTimeout(3000);
                 connection.setConnectTimeout(3000);
+
+                if (connection.getResponseCode() == 429) {
+                    System.out.println("Rate limit exceeded, switching API key...");
+                    return false; // Return and try the next API key
+                }
 
                 try (Scanner scanner = new Scanner(connection.getInputStream())) {
                     String responseBody = scanner.useDelimiter("\\A").next();
@@ -62,10 +89,6 @@ public class Main {
                         System.out.println("No more images found, ending.");
                         break;
                     }
-                } catch (Exception e) {
-                    System.out.println("Failed to download images from: " + requestUrl);
-                    e.printStackTrace();
-                    break;
                 }
             }
 
@@ -74,8 +97,11 @@ public class Main {
                 // wait for all tasks to finish
             }
 
+            return true; // Successfully downloaded images
+
         } catch (IOException e) {
             e.printStackTrace();
+            return false; // Continue to next API key in case of an exception
         }
     }
 
@@ -131,7 +157,7 @@ public class Main {
             case "image/gif":
                 return "gif";
             default:
-                return "unsure.jpg";
+                return "unsure";
         }
     }
 }
